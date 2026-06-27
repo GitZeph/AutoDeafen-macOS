@@ -1,0 +1,21 @@
+# Build output
+build/
+build-*/
+*.geode
+*.dylib
+*.so
+*.dll
+
+# Geode / CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp

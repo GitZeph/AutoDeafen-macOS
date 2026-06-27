@@ -1,0 +1,49 @@
+{
+    "geode": "5.7.1",
+    "gd": {
+        "mac": "2.2081"
+    },
+    "version": "v1.0.0",
+    "id": "robzeph.automacdeafen",
+    "name": "AutoDeafen (macOS)",
+    "developer": "RobZeph",
+    "description": "The first working Discord auto-deafen for macOS. Mutes Discord while you grind.",
+    "tags": ["utility", "interface"],
+    "links": {
+        "source": "https://github.com/GitZeph/AutoDeafen-macOS"
+    },
+    "settings": {
+        "enabled": {
+            "type": "bool",
+            "name": "Enabled",
+            "description": "Master switch for the auto-deafen behaviour.",
+            "default": true
+        },
+        "min-percent": {
+            "type": "int",
+            "name": "Minimum Percent",
+            "description": "Discord will only be deafened once you reach this percentage of the level (0-100).",
+            "default": 0,
+            "min": 0,
+            "max": 100
+        },
+        "undeafen-on-death": {
+            "type": "bool",
+            "name": "Undeafen On Death",
+            "description": "If enabled, Discord is undeafened when you die. Otherwise it stays deafened until you exit the level.",
+            "default": false
+        },
+        "client-id": {
+            "type": "string",
+            "name": "Discord Client ID",
+            "description": "The Client ID of YOUR Discord application (create one for free at https://discord.com/developers/applications). Required to talk to Discord over IPC.",
+            "default": ""
+        },
+        "client-secret": {
+            "type": "string",
+            "name": "Discord Client Secret",
+            "description": "The Client Secret of your Discord application. Used once to obtain an OAuth token; stored locally afterwards.",
+            "default": ""
+        }
+    }
+}
