@@ -1,15 +1,13 @@
-// ---------------------------------------------------------------------------
-// AutoDeafen - Hook di Geode + flusso OAuth + collegamento a Discord IPC
-// ---------------------------------------------------------------------------
-// Approccio: NON simuliamo più la hotkey di Discord (Discord ignora gli eventi
-// tastiera sintetici). Parliamo direttamente al client Discord via IPC e gli
-// diciamo di mutare/smutare con SET_VOICE_SETTINGS.
+// AutoDeafen — Geode hooks, OAuth flow and Discord IPC wiring.
 //
-// Per poterlo fare serve un access_token OAuth con scope "rpc rpc.voice.write".
-// Dato che gli scope RPC sono "whitelist-only" TRANNE che per il proprietario
-// dell'app, ogni utente deve creare la PROPRIA applicazione Discord (gratis) e
-// incollare Client ID + Client Secret nelle impostazioni della mod.
-// ---------------------------------------------------------------------------
+// Rather than simulating Discord's deafen hotkey (macOS ignores synthetic
+// keystrokes for global keybinds), the mod talks to the Discord client over
+// its local IPC socket and toggles deafen with SET_VOICE_SETTINGS.
+//
+// That requires an OAuth access token with the "rpc rpc.voice.write" scopes.
+// Those scopes are whitelist-only except for the application owner, so each
+// user registers their own Discord application and pastes its Client ID and
+// Client Secret into the mod settings.
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
@@ -30,33 +28,29 @@ using namespace geode::prelude;
 
 namespace ad = autodeafen;
 
-// ---------------------------------------------------------------------------
-// Impostazioni + gestione token
-// ---------------------------------------------------------------------------
 namespace {
 
     constexpr const char* kRedirectUri = "http://localhost:8000";
 
-    bool isEnabled()        { return Mod::get()->getSettingValue<bool>("enabled"); }
-    bool undeafenOnDeath()  { return Mod::get()->getSettingValue<bool>("undeafen-on-death"); }
-    std::string clientId()  { return Mod::get()->getSettingValue<std::string>("client-id"); }
-    std::string clientSecret() { return Mod::get()->getSettingValue<std::string>("client-secret"); }
+    bool isEnabled()           { return Mod::get()->getSettingValue<bool>("enabled"); }
+    bool undeafenOnDeath()      { return Mod::get()->getSettingValue<bool>("undeafen-on-death"); }
+    std::string clientId()      { return Mod::get()->getSettingValue<std::string>("client-id"); }
+    std::string clientSecret()  { return Mod::get()->getSettingValue<std::string>("client-secret"); }
 
     long long nowSeconds() {
         return std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     }
 
-    // Feedback all'utente, sempre sul main thread.
+    // Show a notification on the main thread (safe to call from worker threads).
     void notify(std::string text, bool success) {
         Loader::get()->queueInMainThread([text = std::move(text), success] {
             Notification::create(text,
-                success ? NotificationIcon::Success : NotificationIcon::Error)
-                ->show();
+                success ? NotificationIcon::Success : NotificationIcon::Error)->show();
         });
     }
 
-    // Connette l'IPC usando il token salvato (su thread secondario).
+    // Connect and authenticate the IPC client using the stored token.
     void connectIPC() {
         auto token = Mod::get()->getSavedValue<std::string>("access-token");
         auto id = clientId();
@@ -65,17 +59,17 @@ namespace {
         std::thread([id, token] {
             std::string err;
             if (ad::ipc::connect(id, token, err)) {
-                log::info("AutoDeafen: connesso a Discord via IPC");
-                notify("AutoDeafen: connesso a Discord", true);
+                log::info("Connected to Discord over IPC");
+                notify("AutoDeafen: connected to Discord", true);
             } else {
-                log::error("AutoDeafen: connessione IPC fallita: {}", err);
+                log::error("IPC connection failed: {}", err);
                 notify("AutoDeafen: " + err, false);
             }
         }).detach();
     }
 
-    // Esegue una richiesta al token endpoint di Discord (su thread secondario).
-    // `isRefresh` distingue il primo scambio (authorization_code) dal refresh.
+    // POST to Discord's token endpoint (worker thread). Handles both the initial
+    // authorization_code exchange and refresh_token, depending on `body`.
     void requestToken(std::string body) {
         std::thread([body = std::move(body)] {
             auto req = web::WebRequest();
@@ -84,18 +78,16 @@ namespace {
 
             auto res = req.postSync("https://discord.com/api/oauth2/token");
             if (!res.ok()) {
-                std::string detail = res.string().unwrapOr("");
-                log::error("AutoDeafen: richiesta token fallita (HTTP {}): {}",
-                    res.code(), detail);
-                notify("AutoDeafen: autenticazione fallita (HTTP "
+                log::error("Token request failed (HTTP {}): {}",
+                    res.code(), res.string().unwrapOr(""));
+                notify("AutoDeafen: authentication failed (HTTP "
                     + std::to_string(res.code()) + ")", false);
                 return;
             }
 
             auto jsonRes = res.json();
             if (!jsonRes) {
-                log::error("AutoDeafen: risposta token non è JSON valido");
-                notify("AutoDeafen: risposta di Discord non valida", false);
+                notify("AutoDeafen: invalid response from Discord", false);
                 return;
             }
             auto json = jsonRes.unwrap();
@@ -105,8 +97,7 @@ namespace {
             long long expiresIn = json["expires_in"].asInt().unwrapOr(0);
 
             if (access.empty()) {
-                log::error("AutoDeafen: nessun access_token nella risposta");
-                notify("AutoDeafen: token non ricevuto", false);
+                notify("AutoDeafen: no token received", false);
                 return;
             }
 
@@ -114,73 +105,64 @@ namespace {
             Mod::get()->setSavedValue<std::string>("refresh-token", refresh);
             Mod::get()->setSavedValue<int64_t>("token-expiry", nowSeconds() + expiresIn);
 
-            log::info("AutoDeafen: token ottenuto (scade tra {}s)", expiresIn);
             connectIPC();
         }).detach();
     }
 
     void exchangeCodeForToken(std::string const& code) {
-        std::string body =
+        requestToken(
             "client_id=" + clientId() +
             "&client_secret=" + clientSecret() +
             "&grant_type=authorization_code"
             "&code=" + code +
-            "&redirect_uri=" + kRedirectUri;
-        requestToken(body);
+            "&redirect_uri=" + kRedirectUri);
     }
 
     void refreshToken() {
         auto refresh = Mod::get()->getSavedValue<std::string>("refresh-token");
         if (refresh.empty()) return;
-        std::string body =
+        requestToken(
             "client_id=" + clientId() +
             "&client_secret=" + clientSecret() +
             "&grant_type=refresh_token"
-            "&refresh_token=" + refresh;
-        requestToken(body);
+            "&refresh_token=" + refresh);
     }
 
-    // Avvia l'intero flusso: server di redirect + apertura browser su Discord.
+    // Start the redirect server and open Discord's consent page in the browser.
     void startAuthFlow() {
         if (clientId().empty() || clientSecret().empty()) {
-            notify("AutoDeafen: imposta prima Client ID e Client Secret", false);
+            notify("AutoDeafen: set Client ID and Client Secret first", false);
             return;
         }
 
         ad::oauth::startRedirectServer([](std::string code, std::string error) {
             if (code.empty()) {
-                log::error("AutoDeafen: OAuth fallito: {}", error);
-                notify("AutoDeafen: autorizzazione fallita (" + error + ")", false);
+                log::error("OAuth failed: {}", error);
+                notify("AutoDeafen: authorization failed (" + error + ")", false);
                 return;
             }
-            log::info("AutoDeafen: ricevuto code OAuth, scambio in corso");
             exchangeCodeForToken(code);
         });
 
-        std::string url =
+        web::openLinkInBrowser(
             "https://discord.com/oauth2/authorize?client_id=" + clientId() +
             "&response_type=code"
             "&redirect_uri=http%3A%2F%2Flocalhost%3A8000"
-            "&scope=rpc.voice.write+rpc";
-
-        web::openLinkInBrowser(url);
-        notify("AutoDeafen: autorizza nel browser, poi torna al gioco", true);
+            "&scope=rpc.voice.write+rpc");
+        notify("AutoDeafen: authorize in your browser, then return to the game", true);
     }
 
-    // Flusso di onboarding/connessione, mostrato quando NON siamo connessi.
-    // NB: nessun campo Client ID/Secret qui — si impostano nelle impostazioni
-    // Geode della mod. Qui ci sono solo azioni.
+    // Shown when we are not connected. Contains actions only — credentials are
+    // entered in the Geode mod settings, never here.
     void openConnectFlow() {
         if (clientId().empty() || clientSecret().empty()) {
             createQuickPopup(
                 "AutoDeafen",
-                "To work, AutoDeafen needs your own Discord app.\n"
+                "AutoDeafen needs your own Discord app.\n"
                 "Open the <cy>mod settings</c>, paste <cg>Client ID</c> and "
                 "<cg>Client Secret</c>, then come back and press <cb>Authorize</c>.",
                 "Cancel", "Settings",
-                [](auto, bool settings) {
-                    if (settings) openSettingsPopup(Mod::get());
-                });
+                [](auto, bool settings) { if (settings) openSettingsPopup(Mod::get()); });
             return;
         }
         createQuickPopup(
@@ -192,61 +174,52 @@ namespace {
             [](auto, bool ok) { if (ok) startAuthFlow(); });
     }
 
-} // anonymous namespace
+} // namespace
 
-// ---------------------------------------------------------------------------
-// All'avvio: se abbiamo un token salvato, connettiamo (rinfrescando se scaduto).
-// ---------------------------------------------------------------------------
+// On load: if we have a stored token, connect (refreshing it first if expired).
 $on_mod(Loaded) {
-    if (!Mod::get()->hasSavedValue("access-token")) {
-        log::info("AutoDeafen caricata: nessun token salvato, serve setup.");
-        return;
-    }
+    if (!Mod::get()->hasSavedValue("access-token")) return;
 
     long long expiry = Mod::get()->getSavedValue<int64_t>("token-expiry");
     if (nowSeconds() >= expiry && Mod::get()->hasSavedValue("refresh-token")) {
-        log::info("AutoDeafen: token scaduto, refresh in corso");
         refreshToken();
     } else {
         connectIPC();
     }
 }
 
-// ---------------------------------------------------------------------------
-// Hook su PlayLayer: soglia per-livello, cutscene (off), reset, morte, uscita.
-// Modello "stato desiderato": ad ogni frame calcoliamo se DOVREMMO essere
-// deafened e inviamo a Discord solo quando lo stato cambia.
-// ---------------------------------------------------------------------------
+// PlayLayer: drives the deafen state. Each frame we compute whether we should be
+// deafened (desired state) and forward it to the IPC client, which only sends a
+// command to Discord when the state actually changes.
 class $modify(ADPlayLayer, PlayLayer) {
     struct Fields {
-        autodeafen::LevelCfg m_cfg;     // config di questo livello
-        bool m_ready = false;           // true solo dopo aver caricato la config
-        bool m_deadSuppress = false;    // smutato dopo la morte finché non si ricomincia
-        int  m_lastLogged = -1;         // per loggare solo i cambi di stato
+        autodeafen::LevelCfg m_cfg;     // this level's settings
+        bool m_ready = false;           // true once the config has been loaded
+        bool m_deadSuppress = false;    // keep undeafened after death until restart
+        int  m_lastState = -1;          // last applied deaf state (for change logs)
     };
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects))
             return false;
         m_fields->m_cfg = autodeafen::loadCfg(level);
-        m_fields->m_lastLogged = -1;
+        m_fields->m_lastState = -1;
         m_fields->m_deadSuppress = false;
-        m_fields->m_ready = true;       // da qui in poi possiamo deafennare
-        auto const& c = m_fields->m_cfg;
-        log::info("AutoDeafen: cfg loaded key={} enabled={} on={:.1f} offEn={} off={:.1f}",
-                  autodeafen::levelKey(level), c.enabled, c.onPercent, c.offEnabled, c.offPercent);
+        m_fields->m_ready = true;
         return true;
     }
 
     bool computeDesired() {
+        // Deafen only once the config is loaded; PlayLayer::init can trigger an
+        // early postUpdate with default settings, which would flicker at 0%.
         if (!m_fields->m_ready) return false;
         if (!isEnabled()) return false;
         if (!m_fields->m_cfg.enabled) return false;
         if (this->m_hasCompletedLevel) return false;
-        if (m_fields->m_deadSuppress) return false;   // undeafen-on-death attivo
+        if (m_fields->m_deadSuppress) return false;
         if (!ad::ipc::isConnected()) return false;
 
-        // getCurrentPercentInt() è 0-100 (getCurrentPercent() invece è 0.0-1.0).
+        // getCurrentPercentInt() is 0-100; getCurrentPercent() would be 0.0-1.0.
         float p = static_cast<float>(this->getCurrentPercentInt());
         auto const& c = m_fields->m_cfg;
         if (p < c.onPercent) return false;
@@ -256,22 +229,20 @@ class $modify(ADPlayLayer, PlayLayer) {
 
     void applyDesired() {
         bool desired = computeDesired();
-        ad::ipc::setDeafen(desired);   // l'IPC dedupa: invia solo ai cambi reali
-        int d = desired ? 1 : 0;
-        if (d != m_fields->m_lastLogged) {
-            m_fields->m_lastLogged = d;
-            auto const& c = m_fields->m_cfg;
-            log::info("AutoDeafen: deaf={} (perc={} on={:.1f} offEn={} off={:.1f})",
-                      desired, this->getCurrentPercentInt(), c.onPercent, c.offEnabled, c.offPercent);
+        ad::ipc::setDeafen(desired);
+        int state = desired ? 1 : 0;
+        if (state != m_fields->m_lastState) {
+            m_fields->m_lastState = state;
+            log::debug("deaf={} at {}%", desired, this->getCurrentPercentInt());
         }
     }
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
 
-        // Undeafen-on-death: alla morte restiamo smutati FINCHÉ non ricominciamo
-        // (la percentuale torna a/sotto la soglia). Così, se muori sopra la soglia,
-        // non senti il mute/smute ripetuto mentre il corpo resta lì fermo.
+        // Undeafen-on-death: once dead, stay undeafened until the run restarts
+        // (percent drops back to/under the threshold). This avoids a rapid
+        // mute/unmute while the dead player sits past the threshold.
         if (undeafenOnDeath()) {
             if (this->m_player1 && this->m_player1->m_isDead) {
                 m_fields->m_deadSuppress = true;
@@ -291,32 +262,26 @@ class $modify(ADPlayLayer, PlayLayer) {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Hook su PauseLayer: smuta in pausa, bottone impostazioni per-livello.
-// ---------------------------------------------------------------------------
+// PauseLayer: undeafen while paused, and add the per-level settings button.
 class $modify(ADPauseLayer, PauseLayer) {
 
     void customSetup() {
         PauseLayer::customSetup();
 
-        // In pausa smutiamo sempre (così puoi parlare). Alla ripresa postUpdate
-        // ricalcola lo stato desiderato e l'IPC ri-invia il deafen se serve.
+        // Always undeafen while paused so the user can talk; postUpdate re-applies
+        // the desired state on resume.
         ad::ipc::setDeafen(false);
 
-        // Bottone circolare in stile GD. Verde = connesso, grigio = da configurare.
-        bool connected = ad::ipc::isConnected();
+        // Green when connected to Discord, gray when setup is still needed.
         auto circle = CircleButtonSprite::createWithSpriteFrameName(
-            "GJ_optionsBtn_001.png",
-            0.8f,
-            connected ? CircleBaseColor::Green : CircleBaseColor::Gray,
-            CircleBaseSize::Small
-        );
+            "GJ_optionsBtn_001.png", 0.8f,
+            ad::ipc::isConnected() ? CircleBaseColor::Green : CircleBaseColor::Gray,
+            CircleBaseSize::Small);
 
         auto btn = CCMenuItemSpriteExtra::create(
             circle, this, menu_selector(ADPauseLayer::onAutoDeafenSettings));
         btn->setID("autodeafen-settings-button"_spr);
 
-        // Menu a tutto schermo con origine in basso a sinistra: coordinate assolute.
         auto winSize = CCDirector::get()->getWinSize();
         auto menu = CCMenu::create();
         menu->setID("autodeafen-menu"_spr);
@@ -330,7 +295,6 @@ class $modify(ADPauseLayer, PauseLayer) {
     }
 
     void onAutoDeafenSettings(CCObject*) {
-        // Non connessi -> flusso di connessione (senza campi credenziali).
         if (!ad::ipc::isConnected()) {
             openConnectFlow();
             return;
@@ -339,15 +303,14 @@ class $modify(ADPauseLayer, PauseLayer) {
         if (!pl) { openConnectFlow(); return; }
 
         auto cfg = static_cast<ADPlayLayer*>(pl)->m_fields->m_cfg;
-        auto sps = autodeafen::startPosPercents(pl);
+        auto startPositions = autodeafen::startPosPercents(pl);
 
-        ADConfigPopup::create(cfg, sps, [](autodeafen::LevelCfg const& c) {
+        ADConfigPopup::create(cfg, startPositions, [](autodeafen::LevelCfg const& c) {
             if (auto p = PlayLayer::get()) {
                 autodeafen::saveCfg(p->m_level, c);
-                static_cast<ADPlayLayer*>(p)->m_fields->m_cfg = c;
-                static_cast<ADPlayLayer*>(p)->m_fields->m_lastLogged = -1;
-                log::info("AutoDeafen: cfg saved enabled={} on={:.1f} offEn={} off={:.1f}",
-                          c.enabled, c.onPercent, c.offEnabled, c.offPercent);
+                auto adpl = static_cast<ADPlayLayer*>(p);
+                adpl->m_fields->m_cfg = c;
+                adpl->m_fields->m_lastState = -1;
             }
         })->show();
     }

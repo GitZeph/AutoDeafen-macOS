@@ -1,14 +1,12 @@
 #pragma once
 
-// ---------------------------------------------------------------------------
-// AutoDeafen - Popup impostazioni PER-LIVELLO (menu di pausa)
-// ---------------------------------------------------------------------------
-// Solo impostazioni per-livello: abilitato, soglia di deafen, soglia opzionale
-// di undeafen (cutscene). NESSUNA credenziale qui.
+// Per-level settings popup (pause menu).
 //
-// Layout verticale con slider in stile GD (come le impostazioni globali).
-// Lo stepper "StartPos" sposta lo slider sulla percentuale della start position.
-// ---------------------------------------------------------------------------
+// Per-level options only: enabled, deafen threshold, and an optional undeafen
+// threshold (for cutscenes). No credentials here.
+//
+// Vertical layout with GD-style sliders (like the global settings). The
+// "StartPos" stepper snaps a slider to a start position's percentage.
 
 #include <Geode/Geode.hpp>
 #include <Geode/ui/Popup.hpp>
@@ -100,7 +98,7 @@ protected:
         return l;
     }
 
-    // Slider GD centrato in (cx,y) + stepper StartPos sotto.
+    // GD slider centered at (170,y) with a StartPos stepper below it.
     Slider* buildSliderRow(float y, bool isOff, float initialPct,
                            CCLabelBMFont*& spLabelOut) {
         auto slider = Slider::create(this, menu_selector(ADConfigPopup::onSlider), 0.65f);
@@ -108,7 +106,7 @@ protected:
         slider->setValue(clampPct(initialPct) / 100.f);
         m_mainLayer->addChild(slider);
 
-        // Stepper StartPos sotto lo slider
+        // StartPos stepper below the slider.
         float sy = y - 24.f;
         spLabelOut = CCLabelBMFont::create("", "chatFont.fnt");
         spLabelOut->setScale(0.5f);
@@ -152,7 +150,7 @@ protected:
         m_menu->setPosition({ 0.f, 0.f });
         m_mainLayer->addChild(m_menu);
 
-        // --- Enabled su questo livello -------------------------------------
+        // Enabled on this level
         addLabel("Enabled on this level", 30.f, 262.f, 0.55f, 0.f);
         m_enabledToggle = CCMenuItemToggler::createWithStandardSprites(
             this, menu_selector(ADConfigPopup::onToggleEnabled), 0.8f);
@@ -160,12 +158,12 @@ protected:
         m_enabledToggle->toggle(m_cfg.enabled);
         m_menu->addChild(m_enabledToggle);
 
-        // --- DEAFEN AT (slider) --------------------------------------------
+        // Deafen-at threshold
         m_onValLabel = addLabel("Deafen at: 0%", 30.f, 222.f, 0.55f, 0.f);
         m_onSlider = buildSliderRow(196.f, false, m_cfg.onPercent, m_onSpLabel);
         refreshSpLabel(false);
 
-        // --- STOP DEAFEN AT (slider, per cutscene) -------------------------
+        // Undeafen-at threshold (for cutscenes)
         m_offToggle = CCMenuItemToggler::createWithStandardSprites(
             this, menu_selector(ADConfigPopup::onToggleOff), 0.7f);
         m_offToggle->setPosition({ 40.f, 138.f });
@@ -177,7 +175,7 @@ protected:
 
         updateLabels();
 
-        // --- Save ----------------------------------------------------------
+        // Save
         auto saveBtn = CCMenuItemSpriteExtra::create(
             ButtonSprite::create("Save", "goldFont.fnt", "GJ_button_01.png", 0.9f),
             this, menu_selector(ADConfigPopup::onSave));

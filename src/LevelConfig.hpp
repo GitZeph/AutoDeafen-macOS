@@ -1,16 +1,14 @@
 #pragma once
 
-// ---------------------------------------------------------------------------
-// AutoDeafen - Configurazione per-livello
-// ---------------------------------------------------------------------------
-// Ogni livello ha la sua soglia di deafen (e una soglia opzionale di "undeafen",
-// utile per le cutscene). I valori sono salvati per-livello tramite i saved
-// values di Geode, con chiave derivata da id + tipo livello.
+// Per-level configuration.
 //
-// Le StartPos NON vengono salvate: nel popup di pausa, quando l'utente sceglie
-// una startpos, calcoliamo la sua percentuale nel livello e la scriviamo nella
-// soglia. Internamente quindi è tutto a percentuale.
-// ---------------------------------------------------------------------------
+// Each level stores its own deafen threshold (and an optional "undeafen"
+// threshold, handy for cutscenes), persisted through Geode's saved values under
+// a key derived from the level id and type.
+//
+// Start positions are not stored: when the user picks a start position in the
+// pause popup, its level percentage is computed and written into the threshold,
+// so everything is percentage-based internally.
 
 #include <Geode/Geode.hpp>
 #include <Geode/binding/GJGameLevel.hpp>
@@ -25,13 +23,13 @@
 namespace autodeafen {
 
     struct LevelCfg {
-        bool  enabled     = true;    // AutoDeafen attivo su questo livello
-        float onPercent   = 0.f;     // % a cui ci si deafenna
-        bool  offEnabled  = false;   // esiste una soglia di "smetti di deafennare"?
-        float offPercent  = 100.f;   // % a cui ci si ri-smuta
+        bool  enabled    = true;     // auto-deafen active on this level
+        float onPercent  = 0.f;      // percentage at which to deafen
+        bool  offEnabled = false;    // is there an "undeafen" threshold?
+        float offPercent = 100.f;    // percentage at which to undeafen again
     };
 
-    // Tag del tipo di livello, per non confondere livelli diversi con lo stesso id.
+    // Distinguishes levels that share an id (e.g. main level 1 vs online id 1).
     inline int levelTypeTag(GJGameLevel* level) {
         if (!level) return 0;
         if (level->m_levelType != GJLevelType::Saved) return 1; // main/local/editor
@@ -46,14 +44,11 @@ namespace autodeafen {
              + "-" + std::to_string(levelTypeTag(level));
     }
 
-    // Default globali presi dalle impostazioni Geode della mod.
+    // Defaults taken from the global mod settings.
     inline LevelCfg defaultCfg() {
         LevelCfg c;
-        c.enabled    = true;
-        c.onPercent  = static_cast<float>(
+        c.onPercent = static_cast<float>(
             geode::Mod::get()->getSettingValue<int64_t>("default-percent"));
-        c.offEnabled = false;
-        c.offPercent = 100.f;
         return c;
     }
 
@@ -80,8 +75,8 @@ namespace autodeafen {
         geode::Mod::get()->setSavedValue(levelKey(level), v);
     }
 
-    // Percentuali (0-100) di tutte le StartPos del livello, ordinate crescenti.
-    // Vuoto se il livello non ha start positions o la lunghezza è ignota.
+    // Percentages (0-100) of every start position in the level, sorted ascending.
+    // Empty if the level has none or its length is unknown.
     inline std::vector<float> startPosPercents(GJBaseGameLayer* gl) {
         std::vector<float> out;
         if (!gl || !gl->m_objects || gl->m_levelLength <= 0.f) return out;
@@ -91,8 +86,7 @@ namespace autodeafen {
             auto obj = static_cast<cocos2d::CCNode*>(objs->objectAtIndex(i));
             if (geode::cast::typeinfo_cast<StartPosObject*>(obj)) {
                 float pct = obj->getPositionX() / gl->m_levelLength * 100.f;
-                pct = std::clamp(pct, 0.f, 100.f);
-                out.push_back(pct);
+                out.push_back(std::clamp(pct, 0.f, 100.f));
             }
         }
         std::sort(out.begin(), out.end());

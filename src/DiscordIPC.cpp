@@ -1,6 +1,4 @@
-// ---------------------------------------------------------------------------
-// AutoDeafen - Client Discord IPC (implementazione POSIX, macOS)
-// ---------------------------------------------------------------------------
+// Discord IPC client — POSIX implementation (macOS).
 #include "DiscordIPC.hpp"
 
 #include <atomic>
@@ -21,26 +19,24 @@ namespace ipc {
 
 namespace {
 
-    std::mutex        g_mutex;          // protegge le scritture sulla socket
-    int               g_fd = -1;        // file descriptor della socket Discord
+    std::mutex        g_mutex;          // guards socket writes
+    int               g_fd = -1;        // Discord socket file descriptor
     std::atomic<bool> g_authenticated{false};
-    std::atomic<bool> g_running{false}; // controlla il thread di drain
+    std::atomic<bool> g_running{false}; // controls the drain thread
     std::thread       g_drainThread;
 
-    // Ultimo stato deafen inviato (-1 = sconosciuto). Serve a non rispedire
-    // comandi identici ogni frame; va resettato a -1 ad ogni (ri)connessione,
-    // perché lo stato reale di Discord dopo una riconnessione è ignoto.
+    // Last deafen state sent (-1 = unknown). Avoids resending identical commands
+    // every frame; reset to -1 on every (re)connect since Discord's real state
+    // after a reconnect is unknown.
     std::atomic<int>  g_lastDeafen{-1};
 
-    // Costruisce il path "<dir>/discord-ipc-<n>" gestendo lo slash finale.
     std::string joinPath(std::string dir, int n) {
         if (!dir.empty() && dir.back() == '/') dir.pop_back();
         return dir + "/discord-ipc-" + std::to_string(n);
     }
 
-    // Discord espone fino a 10 socket (discord-ipc-0 .. discord-ipc-9), di
-    // solito in $TMPDIR (su macOS è una dir sandbox tipo /var/folders/.../T/).
-    // Proviamo $TMPDIR, poi i classici fallback.
+    // Discord exposes up to 10 sockets (discord-ipc-0 .. discord-ipc-9), usually
+    // in $TMPDIR (a sandbox dir like /var/folders/.../T/ on macOS).
     std::vector<std::string> candidateDirs() {
         std::vector<std::string> dirs;
         auto add = [&](const char* env) {
@@ -52,7 +48,7 @@ namespace {
         return dirs;
     }
 
-    // Apre una connessione a uno qualsiasi dei socket discord-ipc-N.
+    // Connect to any available discord-ipc-N socket.
     int openDiscordSocket() {
         for (auto const& dir : candidateDirs()) {
             for (int n = 0; n < 10; ++n) {
@@ -75,7 +71,7 @@ namespace {
         return -1;
     }
 
-    // Scrive esattamente `len` byte (gestendo le scritture parziali).
+    // Write exactly `len` bytes, handling partial writes and EINTR.
     bool writeAll(int fd, const void* buf, size_t len) {
         const char* p = static_cast<const char*>(buf);
         size_t sent = 0;
@@ -90,7 +86,7 @@ namespace {
         return true;
     }
 
-    // Legge esattamente `len` byte.
+    // Read exactly `len` bytes.
     bool readAll(int fd, void* buf, size_t len) {
         char* p = static_cast<char*>(buf);
         size_t got = 0;
@@ -106,14 +102,14 @@ namespace {
         return true;
     }
 
-    // Invia un frame [opcode][length][payload]. Thread-safe.
+    // Send one [opcode][length][payload] frame. Thread-safe.
     bool sendFrame(int fd, int32_t opcode, std::string const& json) {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (fd < 0) return false;
 
         int32_t op  = opcode;
         int32_t len = static_cast<int32_t>(json.size());
-        // Discord IPC usa interi little-endian; su Apple Silicon/Intel siamo già LE.
+        // Discord IPC expects little-endian integers; Apple Silicon/Intel are LE.
         if (!writeAll(fd, &op, 4))  return false;
         if (!writeAll(fd, &len, 4)) return false;
         if (len > 0 && !writeAll(fd, json.data(), static_cast<size_t>(len)))
@@ -121,12 +117,12 @@ namespace {
         return true;
     }
 
-    // Legge e scarta un frame (ci interessa solo che sia arrivato).
+    // Read and discard one frame; we only care that it arrived.
     bool drainFrame(int fd) {
         int32_t opcode = 0, length = 0;
-        if (!readAll(fd, &opcode, 4))  return false;
-        if (!readAll(fd, &length, 4))  return false;
-        if (length < 0)                return false;
+        if (!readAll(fd, &opcode, 4)) return false;
+        if (!readAll(fd, &length, 4)) return false;
+        if (length < 0)               return false;
         if (length > 0) {
             std::vector<char> payload(static_cast<size_t>(length));
             if (!readAll(fd, payload.data(), static_cast<size_t>(length)))
@@ -135,8 +131,8 @@ namespace {
         return true;
     }
 
-    // Discord manda parecchi eventi non richiesti: se non li leggiamo, prima o
-    // poi le scritture si bloccano. Questo loop li consuma e li butta via.
+    // Discord sends many unsolicited events; if we never read them the socket
+    // buffer eventually blocks our writes. This loop consumes and discards them.
     void drainLoop(int fd) {
         while (g_running.load()) {
             if (!drainFrame(fd)) break;
@@ -154,39 +150,37 @@ namespace {
         }
     }
 
-} // anonymous namespace
+} // namespace
 
 bool connect(std::string const& clientId,
              std::string const& accessToken,
              std::string& errOut) {
-    disconnect(); // riparti pulito
+    disconnect(); // start clean
 
-    if (clientId.empty()) { errOut = "Client ID mancante"; return false; }
-    if (accessToken.empty()) { errOut = "Access token mancante"; return false; }
+    if (clientId.empty())    { errOut = "missing Client ID"; return false; }
+    if (accessToken.empty()) { errOut = "missing access token"; return false; }
 
     int fd = openDiscordSocket();
     if (fd < 0) {
-        errOut = "Impossibile connettersi alla socket IPC di Discord "
-                 "(Discord è aperto?)";
+        errOut = "could not reach Discord's IPC socket (is Discord running?)";
         return false;
     }
 
-    // 1) HANDSHAKE
-    std::string handshake =
-        R"({"v":1,"client_id":")" + clientId + R"("})";
+    // 1) Handshake.
+    std::string handshake = R"({"v":1,"client_id":")" + clientId + R"("})";
     if (!sendFrame(fd, 0, handshake) || !drainFrame(fd)) {
         ::close(fd);
-        errOut = "Handshake IPC fallito";
+        errOut = "IPC handshake failed";
         return false;
     }
 
-    // 2) AUTHENTICATE con l'access_token OAuth.
+    // 2) Authenticate with the OAuth access token.
     std::string authenticate =
         R"({"cmd":"AUTHENTICATE","args":{"access_token":")" + accessToken +
         R"("},"nonce":"auth"})";
     if (!sendFrame(fd, 1, authenticate) || !drainFrame(fd)) {
         ::close(fd);
-        errOut = "AUTHENTICATE fallito (token scaduto o scope errati?)";
+        errOut = "AUTHENTICATE failed (expired token or wrong scopes?)";
         return false;
     }
 
@@ -196,7 +190,7 @@ bool connect(std::string const& clientId,
     }
     g_authenticated.store(true);
     g_running.store(true);
-    g_lastDeafen.store(-1);   // stato reale ignoto: forza il primo invio
+    g_lastDeafen.store(-1);   // real state unknown: force the first send
     g_drainThread = std::thread(drainLoop, fd);
     g_drainThread.detach();
 
@@ -210,8 +204,7 @@ bool isConnected() {
 void setDeafen(bool deaf) {
     if (!isConnected()) return;
 
-    // Dedup: inviamo solo quando lo stato cambia davvero. Così il chiamante può
-    // invocare setDeafen() ad ogni frame senza spammare la socket.
+    // Only send on a real change, so the caller can invoke this every frame.
     int want = deaf ? 1 : 0;
     if (g_lastDeafen.exchange(want) == want) return;
 
@@ -221,8 +214,7 @@ void setDeafen(bool deaf) {
         + std::string(deaf ? "true" : "false")
         + R"(},"nonce":"deafen"})";
 
-    // Inviamo su un thread dedicato: l'I/O sulla socket non deve mai bloccare
-    // il render loop del gioco.
+    // Write off the main thread so socket I/O never stalls the render loop.
     std::thread([fd, payload] {
         sendFrame(fd, 1, payload);
     }).detach();

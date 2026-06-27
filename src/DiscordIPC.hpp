@@ -3,46 +3,39 @@
 #include <string>
 #include <functional>
 
-// ---------------------------------------------------------------------------
-// AutoDeafen - Client Discord IPC (macOS / POSIX)
-// ---------------------------------------------------------------------------
-// Invece di simulare la hotkey di deafen (cosa che Discord ignora se l'evento
-// è sintetico), parliamo DIRETTAMENTE con il client Discord tramite la sua
-// socket IPC locale (Unix domain socket in $TMPDIR/discord-ipc-N).
+// Discord IPC client (macOS / POSIX).
 //
-// Protocollo (Discord RPC over IPC):
-//   ogni frame = [int32 opcode LE][int32 length LE][payload JSON UTF-8]
-//   opcode 0 = HANDSHAKE   -> {"v":1,"client_id":"..."}
-//   opcode 1 = FRAME       -> comandi, es. AUTHENTICATE / SET_VOICE_SETTINGS
+// Instead of simulating the deafen hotkey (which Discord ignores for synthetic
+// events), this talks to the Discord client directly over its local IPC socket
+// (a Unix domain socket at $TMPDIR/discord-ipc-N).
 //
-// Per usare SET_VOICE_SETTINGS serve un access_token OAuth con scope
-// "rpc rpc.voice.write". Lo otteniamo a parte (vedi OAuth in main.cpp) e lo
-// passiamo qui in connect().
+// Discord RPC framing:
+//   each frame = [int32 opcode LE][int32 length LE][UTF-8 JSON payload]
+//   opcode 0 = HANDSHAKE  -> {"v":1,"client_id":"..."}
+//   opcode 1 = FRAME      -> commands, e.g. AUTHENTICATE / SET_VOICE_SETTINGS
 //
-// Questo header è volutamente privo di dipendenze da Geode.
-// ---------------------------------------------------------------------------
+// SET_VOICE_SETTINGS needs an OAuth access token with the "rpc rpc.voice.write"
+// scopes; it is obtained elsewhere (see the OAuth flow in main.cpp) and passed
+// to connect(). This header intentionally has no Geode dependency.
 
 namespace autodeafen {
 namespace ipc {
 
-    // Tenta connessione + handshake + AUTHENTICATE in modo BLOCCANTE.
-    // Va chiamata da un thread secondario (non dal main thread del gioco).
-    //   clientId    : Client ID dell'applicazione Discord dell'utente
-    //   accessToken : access_token OAuth ottenuto in precedenza
-    //   errOut      : messaggio d'errore in caso di fallimento
-    // Ritorna true se siamo connessi e autenticati.
+    // Blocking connect + handshake + AUTHENTICATE. Call from a worker thread,
+    // never from the game's main thread. Returns true once authenticated;
+    // `errOut` holds a human-readable reason on failure.
     bool connect(std::string const& clientId,
                  std::string const& accessToken,
                  std::string& errOut);
 
-    // true se la socket è aperta e l'autenticazione è andata a buon fine.
+    // True if the socket is open and authentication succeeded.
     bool isConnected();
 
-    // Invia SET_VOICE_SETTINGS {deaf: ...}. No-op se non connessi.
-    // L'invio avviene su un thread dedicato per non bloccare il chiamante.
+    // Send SET_VOICE_SETTINGS {deaf: ...}. No-op if not connected. The actual
+    // socket write happens on a worker thread so the caller never blocks.
     void setDeafen(bool deaf);
 
-    // Chiude la socket e ferma il thread di drain.
+    // Close the socket and stop the drain thread.
     void disconnect();
 
 } // namespace ipc

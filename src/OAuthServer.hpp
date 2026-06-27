@@ -3,25 +3,20 @@
 #include <string>
 #include <functional>
 
-// ---------------------------------------------------------------------------
-// AutoDeafen - Mini server HTTP per il redirect OAuth
-// ---------------------------------------------------------------------------
-// Discord, dopo che l'utente autorizza, reindirizza il browser a
-// http://localhost:8000/?code=XXXX . Qui mettiamo in ascolto un socket su
-// 127.0.0.1:8000, leggiamo quella richiesta, estraiamo il "code" e lo passiamo
-// alla callback. Restituiamo una paginetta HTML all'utente.
+// Tiny HTTP server for the OAuth redirect.
 //
-// Tutto avviene su un thread secondario: la funzione non blocca il chiamante.
-// ---------------------------------------------------------------------------
+// After the user authorizes, Discord redirects the browser to
+// http://localhost:8000/?code=XXXX. We listen on 127.0.0.1:8000, read that
+// request, extract the "code" and hand it to the callback, then serve a small
+// HTML confirmation page. Everything runs on a worker thread.
 
 namespace autodeafen {
 namespace oauth {
 
-    // Avvia (una sola volta) il server di redirect su 127.0.0.1:8000.
-    // onResult viene chiamata con (code, error):
-    //   - code valorizzato, error vuoto   -> autorizzazione riuscita
-    //   - code vuoto, error valorizzato   -> errore (timeout, errore di Discord…)
-    // La callback viene invocata su un thread secondario.
+    // Start the redirect server on 127.0.0.1:8000 (only one at a time).
+    // onResult is invoked (on a worker thread) with (code, error):
+    //   - non-empty code, empty error -> authorization succeeded
+    //   - empty code, non-empty error -> failure (timeout, Discord error, ...)
     void startRedirectServer(std::function<void(std::string code,
                                                 std::string error)> onResult);
 

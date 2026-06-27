@@ -1,6 +1,4 @@
-// ---------------------------------------------------------------------------
-// AutoDeafen - Mini server HTTP per il redirect OAuth (POSIX, macOS)
-// ---------------------------------------------------------------------------
+// Tiny HTTP server for the OAuth redirect — POSIX implementation (macOS).
 #include "OAuthServer.hpp"
 
 #include <atomic>
@@ -19,14 +17,13 @@ namespace oauth {
 
 namespace {
 
-    // Evita di aprire due server contemporaneamente sulla stessa porta.
+    // Prevents opening two servers on the same port at once.
     std::atomic<bool> g_serverRunning{false};
 
-    constexpr int   kPort        = 8000;
-    constexpr int   kRecvTimeout = 120; // secondi di attesa per il redirect
+    constexpr int kPort        = 8000;
+    constexpr int kRecvTimeout = 120; // seconds to wait for the redirect
 
-    // Decodifica minimale del percent-encoding (i code OAuth sono già URL-safe,
-    // ma per sicurezza gestiamo eventuali %XX).
+    // Minimal percent-decoding. OAuth codes are URL-safe, but handle %XX anyway.
     std::string urlDecode(std::string const& in) {
         std::string out;
         out.reserve(in.size());
@@ -44,7 +41,7 @@ namespace {
         return out;
     }
 
-    // Estrae il valore di un parametro di query dalla request line "GET /?..."
+    // Extract a query parameter value from the "GET /?..." request line.
     std::string extractParam(std::string const& request, std::string const& key) {
         std::string needle = key + "=";
         size_t pos = request.find(needle);
@@ -69,13 +66,12 @@ namespace {
         ::send(fd, resp.data(), resp.size(), 0);
     }
 
-} // anonymous namespace
+} // namespace
 
 void startRedirectServer(std::function<void(std::string, std::string)> onResult) {
     bool expected = false;
     if (!g_serverRunning.compare_exchange_strong(expected, true)) {
-        // Un server è già attivo: non ne apriamo un altro.
-        return;
+        return; // a server is already running
     }
 
     std::thread([onResult = std::move(onResult)] {
@@ -85,7 +81,7 @@ void startRedirectServer(std::function<void(std::string, std::string)> onResult)
         };
 
         int lsock = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (lsock < 0) { finish("", "socket() fallita"); return; }
+        if (lsock < 0) { finish("", "socket() failed"); return; }
 
         int yes = 1;
         ::setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -93,27 +89,27 @@ void startRedirectServer(std::function<void(std::string, std::string)> onResult)
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(kPort);
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // solo localhost
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // localhost only
 
         if (::bind(lsock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             ::close(lsock);
-            finish("", "porta 8000 occupata (bind fallito)");
+            finish("", "port 8000 is busy (bind failed)");
             return;
         }
         if (::listen(lsock, 1) != 0) {
             ::close(lsock);
-            finish("", "listen() fallita");
+            finish("", "listen() failed");
             return;
         }
 
-        // Timeout sull'accept così non restiamo appesi per sempre.
+        // Accept timeout so we never hang forever.
         timeval tv{ kRecvTimeout, 0 };
         ::setsockopt(lsock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         int csock = ::accept(lsock, nullptr, nullptr);
         if (csock < 0) {
             ::close(lsock);
-            finish("", "nessun redirect ricevuto (timeout)");
+            finish("", "no redirect received (timeout)");
             return;
         }
 
@@ -127,18 +123,18 @@ void startRedirectServer(std::function<void(std::string, std::string)> onResult)
         std::string error = extractParam(request, "error");
 
         if (!code.empty()) {
-            sendHttp(csock, "Tutto fatto!",
-                     "Puoi chiudere questa scheda e tornare a Geometry Dash.");
+            sendHttp(csock, "All set!",
+                     "You can close this tab and return to Geometry Dash.");
         } else {
-            sendHttp(csock, "Errore di autorizzazione",
-                     "Discord non ha restituito un codice. Riprova la procedura.");
+            sendHttp(csock, "Authorization error",
+                     "Discord did not return a code. Please try again.");
         }
 
         ::close(csock);
         ::close(lsock);
 
-        if (!code.empty())  finish(code, "");
-        else                finish("", error.empty() ? "nessun code ricevuto" : error);
+        if (!code.empty()) finish(code, "");
+        else               finish("", error.empty() ? "no code received" : error);
     }).detach();
 }
 
