@@ -23,6 +23,8 @@
 
 #include "DiscordIPC.hpp"
 #include "OAuthServer.hpp"
+#include "LevelConfig.hpp"
+#include "ConfigPopup.hpp"
 
 using namespace geode::prelude;
 
@@ -36,7 +38,6 @@ namespace {
     constexpr const char* kRedirectUri = "http://localhost:8000";
 
     bool isEnabled()        { return Mod::get()->getSettingValue<bool>("enabled"); }
-    int  getMinPercent()    { return static_cast<int>(Mod::get()->getSettingValue<int64_t>("min-percent")); }
     bool undeafenOnDeath()  { return Mod::get()->getSettingValue<bool>("undeafen-on-death"); }
     std::string clientId()  { return Mod::get()->getSettingValue<std::string>("client-id"); }
     std::string clientSecret() { return Mod::get()->getSettingValue<std::string>("client-secret"); }
@@ -166,50 +167,29 @@ namespace {
         notify("AutoDeafen: autorizza nel browser, poi torna al gioco", true);
     }
 
-    // Applica lo stato di deafen solo se l'IPC è pronto e la mod è attiva.
-    void applyDeafen(bool deaf) {
-        if (deaf && !isEnabled()) return;
-        if (!ad::ipc::isConnected()) return;
-        ad::ipc::setDeafen(deaf);
-        log::info("AutoDeafen: SET deaf={}", deaf);
-    }
-
-    // Popup richiamato dal bottone nel menu di pausa.
-    void openAutoDeafenPopup() {
-        if (ad::ipc::isConnected()) {
-            createQuickPopup(
-                "AutoDeafen",
-                "Connesso a <cg>Discord</c>. Puoi regolare percentuale e opzioni "
-                "nelle impostazioni della mod.",
-                "OK", "Impostazioni",
-                [](auto, bool settings) {
-                    if (settings) openSettingsPopup(Mod::get());
-                });
-            return;
-        }
-
+    // Flusso di onboarding/connessione, mostrato quando NON siamo connessi.
+    // NB: nessun campo Client ID/Secret qui — si impostano nelle impostazioni
+    // Geode della mod. Qui ci sono solo azioni.
+    void openConnectFlow() {
         if (clientId().empty() || clientSecret().empty()) {
             createQuickPopup(
                 "AutoDeafen",
-                "Per funzionare serve un'app Discord tua.\n"
-                "Apri le <cy>impostazioni</c> e incolla <cg>Client ID</c> e "
-                "<cg>Client Secret</c>, poi premi <cb>Autorizza</c>.",
-                "Annulla", "Impostazioni",
+                "To work, AutoDeafen needs your own Discord app.\n"
+                "Open the <cy>mod settings</c>, paste <cg>Client ID</c> and "
+                "<cg>Client Secret</c>, then come back and press <cb>Authorize</c>.",
+                "Cancel", "Settings",
                 [](auto, bool settings) {
                     if (settings) openSettingsPopup(Mod::get());
                 });
             return;
         }
-
         createQuickPopup(
             "AutoDeafen",
-            "Pronto a collegarsi a <cg>Discord</c>.\n"
-            "Premendo <cb>Autorizza</c> si aprirà il browser: accetta, poi torna "
-            "qui. <cy>Discord deve essere aperto.</c>",
-            "Annulla", "Autorizza",
-            [](auto, bool ok) {
-                if (ok) startAuthFlow();
-            });
+            "Ready to connect to <cg>Discord</c>.\n"
+            "<cb>Authorize</c> opens your browser: accept, then return here. "
+            "<cy>Discord must be running.</c>",
+            "Cancel", "Authorize",
+            [](auto, bool ok) { if (ok) startAuthFlow(); });
     }
 
 } // anonymous namespace
@@ -233,72 +213,97 @@ $on_mod(Loaded) {
 }
 
 // ---------------------------------------------------------------------------
-// Hook su PlayLayer: soglia, reset, morte, uscita.
+// Hook su PlayLayer: soglia per-livello, cutscene (off), reset, morte, uscita.
+// Modello "stato desiderato": ad ogni frame calcoliamo se DOVREMMO essere
+// deafened e inviamo a Discord solo quando lo stato cambia.
 // ---------------------------------------------------------------------------
 class $modify(ADPlayLayer, PlayLayer) {
     struct Fields {
-        bool m_hasDeafened = false;
+        autodeafen::LevelCfg m_cfg;     // config di questo livello
+        bool m_ready = false;           // true solo dopo aver caricato la config
+        bool m_deadSuppress = false;    // smutato dopo la morte finché non si ricomincia
+        int  m_lastLogged = -1;         // per loggare solo i cambi di stato
     };
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects))
             return false;
-        m_fields->m_hasDeafened = false;
+        m_fields->m_cfg = autodeafen::loadCfg(level);
+        m_fields->m_lastLogged = -1;
+        m_fields->m_deadSuppress = false;
+        m_fields->m_ready = true;       // da qui in poi possiamo deafennare
+        auto const& c = m_fields->m_cfg;
+        log::info("AutoDeafen: cfg loaded key={} enabled={} on={:.1f} offEn={} off={:.1f}",
+                  autodeafen::levelKey(level), c.enabled, c.onPercent, c.offEnabled, c.offPercent);
         return true;
+    }
+
+    bool computeDesired() {
+        if (!m_fields->m_ready) return false;
+        if (!isEnabled()) return false;
+        if (!m_fields->m_cfg.enabled) return false;
+        if (this->m_hasCompletedLevel) return false;
+        if (m_fields->m_deadSuppress) return false;   // undeafen-on-death attivo
+        if (!ad::ipc::isConnected()) return false;
+
+        // getCurrentPercentInt() è 0-100 (getCurrentPercent() invece è 0.0-1.0).
+        float p = static_cast<float>(this->getCurrentPercentInt());
+        auto const& c = m_fields->m_cfg;
+        if (p < c.onPercent) return false;
+        if (c.offEnabled && p >= c.offPercent) return false;
+        return true;
+    }
+
+    void applyDesired() {
+        bool desired = computeDesired();
+        ad::ipc::setDeafen(desired);   // l'IPC dedupa: invia solo ai cambi reali
+        int d = desired ? 1 : 0;
+        if (d != m_fields->m_lastLogged) {
+            m_fields->m_lastLogged = d;
+            auto const& c = m_fields->m_cfg;
+            log::info("AutoDeafen: deaf={} (perc={} on={:.1f} offEn={} off={:.1f})",
+                      desired, this->getCurrentPercentInt(), c.onPercent, c.offEnabled, c.offPercent);
+        }
     }
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-        if (m_fields->m_hasDeafened) return;
-        if (!isEnabled()) return;
 
-        if (this->getCurrentPercentInt() >= getMinPercent()) {
-            applyDeafen(true);
-            m_fields->m_hasDeafened = true;
+        // Undeafen-on-death: alla morte restiamo smutati FINCHÉ non ricominciamo
+        // (la percentuale torna a/sotto la soglia). Così, se muori sopra la soglia,
+        // non senti il mute/smute ripetuto mentre il corpo resta lì fermo.
+        if (undeafenOnDeath()) {
+            if (this->m_player1 && this->m_player1->m_isDead) {
+                m_fields->m_deadSuppress = true;
+            } else if (this->getCurrentPercentInt() <= static_cast<int>(m_fields->m_cfg.onPercent)) {
+                m_fields->m_deadSuppress = false;
+            }
+        } else {
+            m_fields->m_deadSuppress = false;
         }
-    }
 
-    void resetLevel() {
-        PlayLayer::resetLevel();
-        if (m_fields->m_hasDeafened) {
-            applyDeafen(false);
-            m_fields->m_hasDeafened = false;
-        }
-    }
-
-    void destroyPlayer(PlayerObject* player, GameObject* object) {
-        PlayLayer::destroyPlayer(player, object);
-        if (undeafenOnDeath() && m_fields->m_hasDeafened) {
-            applyDeafen(false);
-        }
+        applyDesired();
     }
 
     void onQuit() {
-        if (m_fields->m_hasDeafened) {
-            applyDeafen(false);
-            m_fields->m_hasDeafened = false;
-        }
+        ad::ipc::setDeafen(false);
         PlayLayer::onQuit();
     }
 };
 
 // ---------------------------------------------------------------------------
-// Hook su PauseLayer: smuta in pausa, rimuta alla ripresa, bottone impostazioni.
+// Hook su PauseLayer: smuta in pausa, bottone impostazioni per-livello.
 // ---------------------------------------------------------------------------
 class $modify(ADPauseLayer, PauseLayer) {
-    static bool wasDeafened() {
-        auto pl = PlayLayer::get();
-        if (!pl) return false;
-        return static_cast<ADPlayLayer*>(pl)->m_fields->m_hasDeafened;
-    }
 
     void customSetup() {
         PauseLayer::customSetup();
 
-        if (wasDeafened()) applyDeafen(false);
+        // In pausa smutiamo sempre (così puoi parlare). Alla ripresa postUpdate
+        // ricalcola lo stato desiderato e l'IPC ri-invia il deafen se serve.
+        ad::ipc::setDeafen(false);
 
-        // Bottone circolare in stile GD. Il colore segnala lo stato:
-        //   verde = connesso a Discord, grigio = da configurare/autorizzare.
+        // Bottone circolare in stile GD. Verde = connesso, grigio = da configurare.
         bool connected = ad::ipc::isConnected();
         auto circle = CircleButtonSprite::createWithSpriteFrameName(
             "GJ_optionsBtn_001.png",
@@ -311,27 +316,44 @@ class $modify(ADPauseLayer, PauseLayer) {
             circle, this, menu_selector(ADPauseLayer::onAutoDeafenSettings));
         btn->setID("autodeafen-settings-button"_spr);
 
+        // Menu a tutto schermo con origine in basso a sinistra: coordinate assolute.
+        auto winSize = CCDirector::get()->getWinSize();
         auto menu = CCMenu::create();
-        menu->addChild(btn);
-        menu->setContentSize(btn->getContentSize());
-        btn->setPosition(btn->getContentSize() / 2.f);
-        menu->setAnchorPoint({ 0.f, 1.f });
-        menu->setPosition({ 12.f, CCDirector::get()->getWinSize().height - 12.f });
         menu->setID("autodeafen-menu"_spr);
+        menu->setContentSize(winSize);
+        menu->ignoreAnchorPointForPosition(false);
+        menu->setAnchorPoint({ 0.f, 0.f });
+        menu->setPosition({ 0.f, 0.f });
+        menu->addChild(btn);
+        btn->setPosition({ 35.f, winSize.height - 45.f });
         this->addChild(menu);
     }
 
     void onAutoDeafenSettings(CCObject*) {
-        openAutoDeafenPopup();
-    }
+        // Non connessi -> flusso di connessione (senza campi credenziali).
+        if (!ad::ipc::isConnected()) {
+            openConnectFlow();
+            return;
+        }
+        auto pl = PlayLayer::get();
+        if (!pl) { openConnectFlow(); return; }
 
-    void onResume(CCObject* sender) {
-        if (wasDeafened()) applyDeafen(true);
-        PauseLayer::onResume(sender);
+        auto cfg = static_cast<ADPlayLayer*>(pl)->m_fields->m_cfg;
+        auto sps = autodeafen::startPosPercents(pl);
+
+        ADConfigPopup::create(cfg, sps, [](autodeafen::LevelCfg const& c) {
+            if (auto p = PlayLayer::get()) {
+                autodeafen::saveCfg(p->m_level, c);
+                static_cast<ADPlayLayer*>(p)->m_fields->m_cfg = c;
+                static_cast<ADPlayLayer*>(p)->m_fields->m_lastLogged = -1;
+                log::info("AutoDeafen: cfg saved enabled={} on={:.1f} offEn={} off={:.1f}",
+                          c.enabled, c.onPercent, c.offEnabled, c.offPercent);
+            }
+        })->show();
     }
 
     void onQuit(CCObject* sender) {
-        if (wasDeafened()) applyDeafen(false);
+        ad::ipc::setDeafen(false);
         PauseLayer::onQuit(sender);
     }
 };

@@ -27,6 +27,11 @@ namespace {
     std::atomic<bool> g_running{false}; // controlla il thread di drain
     std::thread       g_drainThread;
 
+    // Ultimo stato deafen inviato (-1 = sconosciuto). Serve a non rispedire
+    // comandi identici ogni frame; va resettato a -1 ad ogni (ri)connessione,
+    // perché lo stato reale di Discord dopo una riconnessione è ignoto.
+    std::atomic<int>  g_lastDeafen{-1};
+
     // Costruisce il path "<dir>/discord-ipc-<n>" gestendo lo slash finale.
     std::string joinPath(std::string dir, int n) {
         if (!dir.empty() && dir.back() == '/') dir.pop_back();
@@ -191,6 +196,7 @@ bool connect(std::string const& clientId,
     }
     g_authenticated.store(true);
     g_running.store(true);
+    g_lastDeafen.store(-1);   // stato reale ignoto: forza il primo invio
     g_drainThread = std::thread(drainLoop, fd);
     g_drainThread.detach();
 
@@ -203,6 +209,11 @@ bool isConnected() {
 
 void setDeafen(bool deaf) {
     if (!isConnected()) return;
+
+    // Dedup: inviamo solo quando lo stato cambia davvero. Così il chiamante può
+    // invocare setDeafen() ad ogni frame senza spammare la socket.
+    int want = deaf ? 1 : 0;
+    if (g_lastDeafen.exchange(want) == want) return;
 
     int fd = g_fd;
     std::string payload =
@@ -219,6 +230,7 @@ void setDeafen(bool deaf) {
 
 void disconnect() {
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_lastDeafen.store(-1);
     closeLocked();
 }
 

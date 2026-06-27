@@ -3,7 +3,7 @@
     "gd": {
         "mac": "2.2081"
     },
-    "version": "v1.0.0",
+    "version": "v2.0.0",
     "id": "robzeph.automacdeafen",
     "name": "AutoDeafen (macOS)",
     "developer": "RobZeph",
@@ -16,13 +16,13 @@
         "enabled": {
             "type": "bool",
             "name": "Enabled",
-            "description": "Master switch for the auto-deafen behaviour.",
+            "description": "Master switch for the auto-deafen behaviour (applies to all levels).",
             "default": true
         },
-        "min-percent": {
+        "default-percent": {
             "type": "int",
-            "name": "Minimum Percent",
-            "description": "Discord will only be deafened once you reach this percentage of the level (0-100).",
+            "name": "Default Percent",
+            "description": "Default deafen percentage used the first time you enter a level. You can override it per-level from the pause menu.",
             "default": 0,
             "min": 0,
             "max": 100
